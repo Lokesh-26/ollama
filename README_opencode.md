@@ -76,13 +76,15 @@ If the exported certificate is DER (`.cer`):
 mkdir -p "$HOME/.config/ollama"
 openssl x509 -inform DER \
   -in "$HOME/Downloads/ollama-server.cer" \
-  -out "$HOME/.config/ollama/server.pem"
+  -out "$HOME/.config/ollama/server.crt"
 
-openssl x509 -in "$HOME/.config/ollama/server.pem" \
+openssl x509 -in "$HOME/.config/ollama/server.crt" \
   -noout -fingerprint -sha256 -ext subjectAltName
 ```
 
-If it is already PEM (begins with `-----BEGIN CERTIFICATE-----`), copy it to `~/.config/ollama/server.pem` instead of converting it.
+If it is already PEM (the file begins with `-----BEGIN CERTIFICATE-----`), copy it to `~/.config/ollama/server.crt` instead of converting it.
+
+> The extension is arbitrary — `.crt`, `.pem` and `.cer` are all used for both encodings. What matters is that the file stunnel and curl read is **PEM text**, not DER binary. Check with `head -c 30 ~/.config/ollama/server.crt`: PEM starts with `-----BEGIN CERTIFICATE-----`. If you use a different filename, change it in `stunnel/ollama.conf` and the `--cacert` commands to match.
 
 Keep this PEM file; stunnel uses it in Step 2b.
 
@@ -97,11 +99,11 @@ $bytes = [IO.File]::ReadAllBytes((Join-Path $HOME 'Downloads\ollama-server.cer')
 $pem = "-----BEGIN CERTIFICATE-----`n" +
        [Convert]::ToBase64String($bytes, [Base64FormattingOptions]::InsertLineBreaks) +
        "`n-----END CERTIFICATE-----`n"
-$certPath = Join-Path $dir 'server.pem'
+$certPath = Join-Path $dir 'server.crt'
 [IO.File]::WriteAllText($certPath, $pem, [Text.Encoding]::ASCII)
 ```
 
-If it is already PEM, copy it to `$HOME\.config\ollama\server.pem`.
+If it is already PEM, copy it to `$HOME\.config\ollama\server.crt`.
 
 > **Verified on 2.0.16:** the certificate is *not* trusted by setting an environment variable. `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and `BUN_CONFIG_EXTRA_CA_CERTS` were each tested against a self-signed gateway and **all three were ignored** — the request still failed with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, as did the certificate installed in the OS trust store. The standalone OpenCode binary is Bun-compiled and does not consult them. (This was measured on the Linux standalone binary; an npm/Node installation may behave differently, but the tunnel in Step 2b works on both platforms either way.) Do **not** work around this with `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
@@ -124,7 +126,7 @@ foreground = yes
 client = yes
 accept = 127.0.0.1:11435
 connect = SERVER_HOST_OR_IP:443
-CAfile = /home/YOUR_USER/.config/ollama/server.pem
+CAfile = /home/YOUR_USER/.config/ollama/server.crt
 verifyPeer = yes
 EOF
 ```
@@ -134,8 +136,7 @@ Replace `YOUR_USER` and `SERVER_HOST_OR_IP`. The `pid` line matters: without it 
 Start it (it does not auto-start; `foreground = yes` means it dies with its terminal, so detach it):
 
 ```bash
-pgrep -x stunnel >/dev/null || \
-  nohup stunnel "$HOME/.config/stunnel/ollama.conf" > "$HOME/.config/stunnel/stunnel.log" 2>&1 &
+pgrep -x stunnel >/dev/null || nohup stunnel "$HOME/.config/stunnel/ollama.conf" > "$HOME/.config/stunnel/stunnel.log" 2>&1 &
 ss -ltn | grep 11435          # expect a LISTEN line
 ```
 
@@ -153,7 +154,7 @@ $conf = @"
 client = yes
 accept = 127.0.0.1:11435
 connect = SERVER_HOST_OR_IP:443
-CAfile = $HOME\.config\ollama\server.pem
+CAfile = $HOME\.config\ollama\server.crt
 verifyPeer = yes
 "@
 [IO.File]::WriteAllText((Join-Path $dir 'ollama.conf'), $conf, [Text.Encoding]::ASCII)
@@ -172,7 +173,7 @@ Replace the server placeholder in the example URL. Use the **gateway login**, no
 ### Linux
 
 ```bash
-curl --cacert "$HOME/.config/ollama/server.pem" \
+curl --cacert "$HOME/.config/ollama/server.crt" \
   -u 'YOUR_GATEWAY_USERNAME' \
   'https://SERVER_HOST_OR_IP/v1/models'
 ```
@@ -181,7 +182,7 @@ curl --cacert "$HOME/.config/ollama/server.pem" \
 
 ```powershell
 $GatewayUser = Read-Host 'Gateway username'
-curl.exe --cacert "$HOME\.config\ollama\server.pem" `
+curl.exe --cacert "$HOME\.config\ollama\server.crt" `
   -u $GatewayUser `
   'https://SERVER_HOST_OR_IP/v1/models'
 ```
@@ -206,18 +207,34 @@ Basic Auth is Base64 encoding, **not encryption**; TLS protects the header in tr
 
 ```bash
 mkdir -p "$HOME/.config/opencode"
-read -r -p 'Gateway username: ' GATEWAY_USER
-read -r -s -p 'Gateway password: ' GATEWAY_PASSWORD
-printf '\n'
+
+printf 'Gateway username: '; read -r  GATEWAY_USER
+printf 'Gateway password: '; read -rs GATEWAY_PASSWORD; printf '\n'
 
 umask 077
-printf '%s:%s' "$GATEWAY_USER" "$GATEWAY_PASSWORD" \
-  | base64 | tr -d '\n' > "$HOME/.config/opencode/basic_auth"
+printf '%s:%s' "$GATEWAY_USER" "$GATEWAY_PASSWORD" | base64 | tr -d '\n' > "$HOME/.config/opencode/basic_auth"
 unset GATEWAY_USER GATEWAY_PASSWORD
 chmod 600 "$HOME/.config/opencode/basic_auth"
 ```
 
-On Zsh, prefix the command with a space (or use `read -rs "VAR?prompt"`) so nothing reaches shell history.
+> **Paste this block as whole lines.** If your terminal wraps or splits a line mid-command you get `zsh: parse error near '\n'` — most often from a line break landing right after a `>` redirect. If that happens, run the steps one line at a time, or use the single-line form: `umask 077; printf "Gateway username: "; read -r U; printf "Gateway password: "; read -rs P; printf "\n"; printf "%s:%s" "$U" "$P" | base64 | tr -d "\n" > "$HOME/.config/opencode/basic_auth"; unset U P; chmod 600 "$HOME/.config/opencode/basic_auth"`
+
+> **Do not use `read -p` here.** It prompts in Bash, but in Zsh `-p` means *read from a coprocess*, so the command fails with `read: -p: no coprocess`, both variables stay empty, and the pipeline still writes a file — containing `Og==`, the Base64 of a bare `:`. Nothing reports an error, and OpenCode then returns `401` against a gateway that works fine in `curl`. The form above uses `printf` for the prompt and `read -rs` for the silent read, both of which behave identically in Bash and Zsh.
+
+Verify immediately — this is the step that catches the failure above:
+
+```bash
+wc -c < "$HOME/.config/opencode/basic_auth"        # must be well above 4
+base64 -d < "$HOME/.config/opencode/basic_auth"; echo
+```
+
+The decoded value must read `yourusername:yourpassword`. A bare `:` means both prompts were skipped. Then confirm the gateway accepts it:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Basic $(cat "$HOME/.config/opencode/basic_auth")" http://127.0.0.1:11435/v1/models
+```
+
+`200` is correct; `401` means the credential is wrong.
 
 ### Windows PC (PowerShell)
 
@@ -338,8 +355,7 @@ There is nothing to export and no per-terminal setup. Two things must be true be
 
 ```bash
 # 1. tunnel (once per boot; skip if already running)
-pgrep -x stunnel >/dev/null || \
-  nohup stunnel "$HOME/.config/stunnel/ollama.conf" > "$HOME/.config/stunnel/stunnel.log" 2>&1 &
+pgrep -x stunnel >/dev/null || nohup stunnel "$HOME/.config/stunnel/ollama.conf" > "$HOME/.config/stunnel/stunnel.log" 2>&1 &
 
 # 2. launch in your project directory
 cd "$HOME/opencode-test"
@@ -429,7 +445,7 @@ A larger model or context may trigger CPU offloading; check performance before k
 | `curl: (77)` | PEM file missing, unreadable, or wrong format. |
 | Self-signed certificate error with `--cacert` or in stunnel | Local file may be an older certificate; compare the live server and exported certificate SHA-256 fingerprints. |
 | Certificate name/SAN mismatch | URL must match a DNS or IP SAN; a numeric IP needs an **IP Address** SAN. |
-| `401 Unauthorized` | Contents of `~/.config/opencode/basic_auth`; confirm `curl -u USER http://127.0.0.1:11435/v1/models` succeeds. If you are still using `{env:...}`, the background service is holding a stale value — `opencode service restart`. |
+| `401 Unauthorized` | Decode the credential file first: `base64 -d < ~/.config/opencode/basic_auth`. If it prints a bare `:`, the prompts were skipped — see the `read -p` warning in Step 4. Otherwise confirm `curl -u USER http://127.0.0.1:11435/v1/models` succeeds. If you are still using `{env:...}`, the background service is holding a stale value — `opencode service restart`. |
 | `404`, `502`, or timeout | Verify the existing gateway forwards the OpenAI-compatible `/v1` routes. |
 | `ConnectionRefused` / nothing on `127.0.0.1:11435` | stunnel is not running. `pgrep -x stunnel` (Linux) or `Get-Process stunnel` (Windows); restart it as in Step 2b. Check `stunnel.log` for `Cannot create pid file` — add the `pid =` line. |
 | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | OpenCode is talking to the gateway directly instead of the tunnel. Confirm `options.baseURL` is `http://127.0.0.1:11435/v1`. Certificate environment variables do not help on 2.0.16; do not disable verification. |
